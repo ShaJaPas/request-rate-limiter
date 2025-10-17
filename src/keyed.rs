@@ -38,6 +38,7 @@ where
 ///
 /// Uses DashMap for efficient concurrent access to per-key rate limiters.
 /// Each key gets its own independent rate limiter instance.
+#[derive(Debug)]
 pub struct DefaultRateLimiterKeyed<T, K>
 where
     T: RateLimitAlgorithm + Debug + Clone,
