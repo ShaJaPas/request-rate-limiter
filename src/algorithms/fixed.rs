@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use super::{RateLimitAlgorithm, RequestSample};
 
 /// A simple, fixed request rate limit.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Fixed(u64);
 impl Fixed {
     #[allow(missing_docs)]

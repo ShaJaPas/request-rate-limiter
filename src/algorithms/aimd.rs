@@ -29,6 +29,18 @@ pub struct Aimd {
     requests_per_second: AtomicU64,
 }
 
+impl Clone for Aimd {
+    fn clone(&self) -> Self {
+        Self {
+            min_rps: self.min_rps.clone(),
+            max_rps: self.max_rps.clone(),
+            decrease_factor: self.decrease_factor.clone(),
+            increase_by: self.increase_by.clone(),
+            requests_per_second: AtomicU64::new(self.requests_per_second.load(Ordering::Acquire)),
+        }
+    }
+}
+
 impl Aimd {
     const DEFAULT_DECREASE_FACTOR: f64 = 0.8;
     const DEFAULT_INCREASE: u64 = 10;

@@ -38,38 +38,34 @@ where
 ///
 /// Uses DashMap for efficient concurrent access to per-key rate limiters.
 /// Each key gets its own independent rate limiter instance.
-pub struct DefaultRateLimiterKeyed<T, K, F>
+pub struct DefaultRateLimiterKeyed<T, K>
 where
-    T: RateLimitAlgorithm + Debug,
+    T: RateLimitAlgorithm + Debug + Clone,
     K: Hash + Eq + Send + Sync,
-    F: Fn() -> T + Send + Sync,
 {
     limiters: DashMap<K, DefaultRateLimiter<T>>,
-    algorithm_factory: F,
+    algorithm: T,
 }
 
-impl<T, K, F> DefaultRateLimiterKeyed<T, K, F>
+impl<T, K> DefaultRateLimiterKeyed<T, K>
 where
-    T: RateLimitAlgorithm + Debug,
+    T: RateLimitAlgorithm + Debug + Clone,
     K: Hash + Eq + Clone + Send + Sync,
-    F: Fn() -> T + Send + Sync,
 {
     /// Create a new keyed rate limiter with the given algorithm factory function.
     /// Each key will get a fresh instance of the algorithm created by calling the factory.
-    pub fn new(algorithm_factory: F) -> Self {
+    pub fn new(algorithm: T) -> Self {
         Self {
             limiters: DashMap::new(),
-            algorithm_factory,
+            algorithm,
         }
     }
 
     /// Get or create a rate limiter for the given key.
     fn get_or_create_limiter(&self, key: &K) -> Ref<'_, K, DefaultRateLimiter<T>> {
         if !self.limiters.contains_key(key) {
-            self.limiters.insert(
-                key.clone(),
-                DefaultRateLimiter::new((self.algorithm_factory)()),
-            );
+            self.limiters
+                .insert(key.clone(), DefaultRateLimiter::new(self.algorithm.clone()));
         }
 
         self.limiters.get(key).unwrap()
@@ -93,11 +89,10 @@ where
 }
 
 #[async_trait]
-impl<T, K, F> RateLimiterKeyed<K> for DefaultRateLimiterKeyed<T, K, F>
+impl<T, K> RateLimiterKeyed<K> for DefaultRateLimiterKeyed<T, K>
 where
-    T: RateLimitAlgorithm + Send + Sync + Debug,
+    T: RateLimitAlgorithm + Send + Clone + Sync + Debug,
     K: Hash + Eq + Clone + Send + Sync,
-    F: Fn() -> T + Send + Sync,
 {
     async fn acquire(&self, key: &K) -> Token {
         let limiter = self.get_or_create_limiter(key);
@@ -125,7 +120,7 @@ mod tests {
 
     #[tokio::test]
     async fn keyed_rate_limiter_works_independently_per_key() {
-        let limiter = DefaultRateLimiterKeyed::<_, String, _>::new(|| Fixed::new(1));
+        let limiter = DefaultRateLimiterKeyed::<_, String>::new(Fixed::new(1));
 
         let key1 = "key1".to_string();
         let key2 = "key2".to_string();
@@ -146,7 +141,7 @@ mod tests {
 
     #[tokio::test]
     async fn keyed_rate_limiter_manages_keys() {
-        let limiter = DefaultRateLimiterKeyed::<_, String, _>::new(|| Fixed::new(10));
+        let limiter = DefaultRateLimiterKeyed::<_, String>::new(Fixed::new(10));
 
         // Create limiters for multiple keys
         let _token1 = limiter.acquire(&"user1".to_string()).await;
