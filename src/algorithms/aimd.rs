@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use conv::ConvUtil;
 
-use crate::{limiter::RequestOutcome, algorithms::RequestSample};
+use crate::{algorithms::RequestSample, limiter::RequestOutcome};
 
 use super::RateLimitAlgorithm;
 
@@ -145,9 +145,13 @@ mod tests {
 
         let token = limiter.acquire().await;
         limiter.release(token, Some(RequestOutcome::Overload)).await;
-        
+
         let state = limiter.state();
-        assert_eq!(state.requests_per_second(), 50, "overload: should decrease rate");
+        assert_eq!(
+            state.requests_per_second(),
+            50,
+            "overload: should decrease rate"
+        );
     }
 
     #[tokio::test]
@@ -160,9 +164,13 @@ mod tests {
 
         let token = limiter.acquire().await;
         limiter.release(token, Some(RequestOutcome::Success)).await;
-        
+
         let state = limiter.state();
-        assert_eq!(state.requests_per_second(), 70, "success: should increase rate");
+        assert_eq!(
+            state.requests_per_second(),
+            70,
+            "success: should increase rate"
+        );
     }
 
     #[tokio::test]
@@ -175,8 +183,12 @@ mod tests {
 
         let token = limiter.acquire().await;
         limiter.release(token, None).await;
-        
+
         let state = limiter.state();
-        assert_eq!(state.requests_per_second(), 100, "should ignore when no outcome");
+        assert_eq!(
+            state.requests_per_second(),
+            100,
+            "should ignore when no outcome"
+        );
     }
 }

@@ -21,7 +21,7 @@ type AtomicRequestCount = AtomicU64;
 /// The token tracks when the request was started for timing measurements.
 #[derive(Debug)]
 pub struct Token {
-    start_time: Instant
+    start_time: Instant,
 }
 
 /// Controls the rate of requests over time.
@@ -88,7 +88,7 @@ where
     pub fn new(algorithm: T) -> Self {
         let initial_rps = algorithm.requests_per_second();
         let bucket_capacity = initial_rps; // Use the same value for bucket capacity
-        
+
         assert!(initial_rps >= 1);
         Self {
             algorithm,
@@ -103,8 +103,10 @@ where
         let now = Instant::now();
         if let Ok(mut last_refill) = self.last_refill.try_lock() {
             let elapsed = now.duration_since(*last_refill);
-            let tokens_to_add = (elapsed.as_secs_f64() * self.requests_per_second.load(Ordering::Acquire) as f64) as u64;
-            
+            let tokens_to_add = (elapsed.as_secs_f64()
+                * self.requests_per_second.load(Ordering::Acquire) as f64)
+                as u64;
+
             if tokens_to_add > 0 {
                 let current_tokens = self.tokens.load(Ordering::Acquire);
                 let new_tokens = (current_tokens + tokens_to_add).min(self.bucket_capacity);
@@ -133,7 +135,7 @@ where
     async fn acquire(&self) -> Token {
         loop {
             self.refill_tokens();
-            
+
             // Try to consume a token atomically
             let current_tokens = self.tokens.load(Ordering::Acquire);
             if current_tokens > 0 {
@@ -147,7 +149,7 @@ where
                         return Token {
                             start_time: Instant::now(),
                         };
-                    },
+                    }
                     Err(_) => continue, // Retry on contention
                 }
             } else {
@@ -158,19 +160,16 @@ where
     }
 
     async fn acquire_timeout(&self, duration: Duration) -> Option<Token> {
-        match timeout(duration, self.acquire()).await {
-            Ok(token) => Some(token),
-            Err(_) => None, // Timeout
-        }
+        timeout(duration, self.acquire()).await.ok()
     }
 
     async fn release(&self, token: Token, outcome: Option<RequestOutcome>) {
         let response_time = token.start_time.elapsed();
-        
+
         if let Some(outcome) = outcome {
             let current_rps = self.requests_per_second.load(Ordering::Acquire);
             let sample = RequestSample::new(response_time, current_rps, outcome);
-            
+
             let new_rps = self.algorithm.update(sample).await;
             self.requests_per_second.store(new_rps, Ordering::Release);
         }
@@ -195,8 +194,8 @@ impl RateLimiterState {
 #[cfg(test)]
 mod tests {
     use crate::{
-        limiter::{DefaultRateLimiter, RateLimiter, RequestOutcome},
         algorithms::Fixed,
+        limiter::{DefaultRateLimiter, RateLimiter, RequestOutcome},
     };
     use std::time::Duration;
 
@@ -206,7 +205,7 @@ mod tests {
 
         // Should allow first request
         let token = limiter.acquire().await;
-        
+
         // Release with successful outcome
         limiter.release(token, Some(RequestOutcome::Success)).await;
     }
@@ -214,24 +213,22 @@ mod tests {
     #[tokio::test]
     async fn rate_limiter_waits_for_tokens() {
         use std::sync::Arc;
-        
+
         let limiter = Arc::new(DefaultRateLimiter::new(Fixed::new(1)));
 
         // Consume the only token
         let token1 = limiter.acquire().await;
-        
+
         // Start acquiring second token (should wait)
         let limiter_clone = Arc::clone(&limiter);
-        let acquire_task = tokio::spawn(async move {
-            limiter_clone.acquire().await
-        });
-        
+        let acquire_task = tokio::spawn(async move { limiter_clone.acquire().await });
+
         // Give it a moment to start waiting
         tokio::time::sleep(Duration::from_millis(10)).await;
-        
+
         // Release the first token - this should allow the second acquire to complete
         limiter.release(token1, Some(RequestOutcome::Success)).await;
-        
+
         // The second acquire should now complete
         let token2 = acquire_task.await.unwrap();
         limiter.release(token2, Some(RequestOutcome::Success)).await;
