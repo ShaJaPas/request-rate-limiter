@@ -32,10 +32,10 @@ pub struct Aimd {
 impl Clone for Aimd {
     fn clone(&self) -> Self {
         Self {
-            min_rps: self.min_rps.clone(),
-            max_rps: self.max_rps.clone(),
-            decrease_factor: self.decrease_factor.clone(),
-            increase_by: self.increase_by.clone(),
+            min_rps: self.min_rps,
+            max_rps: self.max_rps,
+            decrease_factor: self.decrease_factor,
+            increase_by: self.increase_by,
             requests_per_second: AtomicU64::new(self.requests_per_second.load(Ordering::Acquire)),
         }
     }
@@ -109,24 +109,22 @@ impl RateLimitAlgorithm for Aimd {
     async fn update(&self, sample: RequestSample) -> u64 {
         use RequestOutcome::*;
         match sample.outcome {
-            Success | ClientError => {
-                self.requests_per_second
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |rps| {
-                        let new_rps = rps + self.increase_by;
-                        Some(new_rps.clamp(self.min_rps, self.max_rps))
-                    })
-                    .expect("we always return Some(rps)");
-            }
-            Overload => {
-                self.requests_per_second
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |rps| {
-                        let new_rps = multiplicative_decrease(rps, self.decrease_factor);
-                        Some(new_rps.clamp(self.min_rps, self.max_rps))
-                    })
-                    .expect("we always return Some(rps)");
-            }
+            Success | ClientError => self
+                .requests_per_second
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |rps| {
+                    let new_rps = (rps + self.increase_by).min(self.max_rps);
+                    Some(new_rps)
+                })
+                .expect("we always return Some(rps)"),
+            Overload => self
+                .requests_per_second
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |rps| {
+                    let new_rps =
+                        multiplicative_decrease(rps, self.decrease_factor).max(self.min_rps);
+                    Some(new_rps)
+                })
+                .expect("we always return Some(rps)"),
         }
-        self.requests_per_second.load(Ordering::SeqCst)
     }
 }
 

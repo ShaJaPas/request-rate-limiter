@@ -1,6 +1,6 @@
 [package]
 name = "request-rate-limiter"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ShaJaPas"]
@@ -15,13 +15,14 @@ keywords = ["rate-limiting", "requests", "throttling", "limiter", "backpressure"
 categories = ["web-programming", "algorithms"]
 
 [dependencies]
-tokio = { version = "1.48.0", features = ["sync", "time"] }
+tokio = { version = "1.48.0", features = ["sync", "time", "rt"] }
 async-trait = "0.1.89"
 conv = "0.3.3"
 dashmap = { version = "6.1", optional = true }
+crossbeam-utils = "0.8"
 
 [dev-dependencies]
-doc-comment = "0.3.3"
+doc-comment = "0.3.4"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
 
 [features]

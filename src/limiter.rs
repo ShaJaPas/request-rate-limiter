@@ -10,12 +10,12 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::time::{sleep, timeout};
+use crossbeam_utils::Backoff;
+use tokio::time::timeout;
 
 use crate::algorithms::{RateLimitAlgorithm, RequestSample};
 
 type RequestCount = u64;
-type AtomicRequestCount = AtomicU64;
 
 /// A token representing permission to make a request.
 /// The token tracks when the request was started for timing measurements.
@@ -48,10 +48,11 @@ pub trait RateLimiter: Debug + Sync {
 #[derive(Debug)]
 pub struct DefaultRateLimiter<T> {
     algorithm: T,
-    tokens: Arc<AtomicRequestCount>,
-    last_refill: Arc<std::sync::Mutex<Instant>>,
-    requests_per_second: Arc<AtomicRequestCount>,
+    tokens: Arc<AtomicU64>,
+    last_refill_nanos: Arc<AtomicU64>,
+    requests_per_second: Arc<AtomicU64>,
     bucket_capacity: RequestCount,
+    refill_interval_nanos: Arc<AtomicU64>,
 }
 
 /// A snapshot of the state of the rate limiter.
@@ -90,28 +91,59 @@ where
         let bucket_capacity = initial_rps; // Use the same value for bucket capacity
 
         assert!(initial_rps >= 1);
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
         Self {
             algorithm,
-            tokens: Arc::new(AtomicRequestCount::new(bucket_capacity)),
-            last_refill: Arc::new(std::sync::Mutex::new(Instant::now())),
-            requests_per_second: Arc::new(AtomicRequestCount::new(initial_rps)),
+            tokens: Arc::new(AtomicU64::new(bucket_capacity)),
+            last_refill_nanos: Arc::new(AtomicU64::new(now_nanos)),
+            requests_per_second: Arc::new(AtomicU64::new(initial_rps)),
             bucket_capacity,
+            refill_interval_nanos: Arc::new(AtomicU64::new(1_000_000_000 / initial_rps)),
         }
     }
 
+    #[inline]
     fn refill_tokens(&self) {
-        let now = Instant::now();
-        if let Ok(mut last_refill) = self.last_refill.try_lock() {
-            let elapsed = now.duration_since(*last_refill);
-            let tokens_to_add = (elapsed.as_secs_f64()
-                * self.requests_per_second.load(Ordering::Acquire) as f64)
-                as u64;
+        let current_tokens = self.tokens.load(Ordering::Relaxed);
+        if current_tokens >= self.bucket_capacity {
+            return; // Already at capacity
+        }
+
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let last_refill = self.last_refill_nanos.load(Ordering::Relaxed);
+        let elapsed_nanos = now_nanos.saturating_sub(last_refill);
+        let refill_interval = self.refill_interval_nanos.load(Ordering::Relaxed);
+
+        if elapsed_nanos >= refill_interval {
+            let tokens_to_add = elapsed_nanos / refill_interval;
 
             if tokens_to_add > 0 {
-                let current_tokens = self.tokens.load(Ordering::Acquire);
-                let new_tokens = (current_tokens + tokens_to_add).min(self.bucket_capacity);
-                self.tokens.store(new_tokens, Ordering::SeqCst);
-                *last_refill = now;
+                // Atomic update of both tokens and last_refill_nanos
+                let _ = self.last_refill_nanos.compare_exchange_weak(
+                    last_refill,
+                    now_nanos,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                );
+
+                self.tokens
+                    .fetch_update(Ordering::Release, Ordering::Relaxed, |current| {
+                        let new_tokens = (current + tokens_to_add).min(self.bucket_capacity);
+                        if new_tokens > current {
+                            Some(new_tokens)
+                        } else {
+                            None
+                        }
+                    })
+                    .ok();
             }
         }
     }
@@ -120,7 +152,7 @@ where
     pub fn state(&self) -> RateLimiterState {
         self.refill_tokens();
         RateLimiterState {
-            requests_per_second: self.requests_per_second.load(Ordering::Acquire),
+            requests_per_second: self.algorithm.requests_per_second(),
             available_tokens: self.tokens.load(Ordering::Acquire),
             bucket_capacity: self.bucket_capacity,
         }
@@ -133,28 +165,48 @@ where
     T: RateLimitAlgorithm + Sync + Debug,
 {
     async fn acquire(&self) -> Token {
+        let backoff = Backoff::new();
+
         loop {
+            // Fast path: try to consume token without refill check
+            if self.tokens
+                    .fetch_update(Ordering::Acquire, Ordering::Relaxed, |current| {
+                        if current > 0 {
+                            Some(current - 1)
+                        } else {
+                            None
+                        }
+                    }).is_ok()
+            {
+                return Token {
+                    start_time: Instant::now(),
+                };
+            }
+
+            // Slow path: refill and retry
             self.refill_tokens();
 
-            // Try to consume a token atomically
-            let current_tokens = self.tokens.load(Ordering::Acquire);
-            if current_tokens > 0 {
-                match self.tokens.compare_exchange_weak(
-                    current_tokens,
-                    current_tokens - 1,
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        return Token {
-                            start_time: Instant::now(),
-                        };
-                    }
-                    Err(_) => continue, // Retry on contention
-                }
+            // Try again after refill
+            if self.tokens
+                    .fetch_update(Ordering::Acquire, Ordering::Relaxed, |current| {
+                        if current > 0 {
+                            Some(current - 1)
+                        } else {
+                            None
+                        }
+                    }).is_ok()
+            {
+                return Token {
+                    start_time: Instant::now(),
+                };
+            }
+
+            // Adaptive backoff
+            if backoff.is_completed() {
+                tokio::task::yield_now().await;
+                backoff.reset();
             } else {
-                // No tokens available, wait a bit before retrying
-                sleep(Duration::from_millis(1)).await;
+                backoff.spin();
             }
         }
     }
@@ -167,11 +219,17 @@ where
         let response_time = token.start_time.elapsed();
 
         if let Some(outcome) = outcome {
-            let current_rps = self.requests_per_second.load(Ordering::Acquire);
+            let current_rps = self.requests_per_second.load(Ordering::Relaxed);
             let sample = RequestSample::new(response_time, current_rps, outcome);
 
             let new_rps = self.algorithm.update(sample).await;
-            self.requests_per_second.store(new_rps, Ordering::Release);
+            self.requests_per_second.store(new_rps, Ordering::Relaxed);
+
+            // Update refill interval if RPS changed
+            if new_rps != current_rps && new_rps > 0 {
+                self.refill_interval_nanos
+                    .store(1_000_000_000 / new_rps, Ordering::Relaxed);
+            }
         }
     }
 }

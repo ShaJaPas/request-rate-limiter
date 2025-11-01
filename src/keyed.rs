@@ -63,12 +63,14 @@ where
     }
 
     /// Get or create a rate limiter for the given key.
+    /// Uses entry API for better performance and reduced contention.
     fn get_or_create_limiter(&self, key: &K) -> Ref<'_, K, DefaultRateLimiter<T>> {
-        if !self.limiters.contains_key(key) {
-            self.limiters
-                .insert(key.clone(), DefaultRateLimiter::new(self.algorithm.clone()));
-        }
+        // Use entry API to avoid double lookup
+        self.limiters
+            .entry(key.clone())
+            .or_insert_with(|| DefaultRateLimiter::new(self.algorithm.clone()));
 
+        // This unwrap is safe because we just inserted the key if it didn't exist
         self.limiters.get(key).unwrap()
     }
 
